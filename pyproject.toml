@@ -4,8 +4,13 @@ version = "0.1.0"
 description = "Generic, agent-agnostic framework for authoring and sharing agent skills."
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
+dependencies = [
+    "pytest>=7.0",
+    "sqlglot>=2.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tools/tests", "skills"]
 python_files = ["test_*.py"]
 addopts = "-q"
+pythonpath = ["."]
