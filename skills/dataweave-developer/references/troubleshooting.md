@@ -1,0 +1,347 @@
+# DataWeave troubleshooting
+
+Common errors, their causes and fixes.
+
+## Troubleshooting a Failing DataWeave Script
+
+When you troubleshoot a failing script, one challenge to reproducing an error is having the same inputs the script had
+when it executed, especially in production environments where inputs can
+change unexpectedly. Therefore, it's important to capture the inputs going into a
+script debugging or using loggers. Often, the failures occur because the input
+coming from another component upstream is not valid. You can find here a listing of the most common DataWeave errors and how to overcome them.
+
+### Dump Input Context and the Script into a Folder
+
+In Mule 4.2.1, DataWeave introduced an experimental feature that enables you
+to dump the input context and the failing script into a folder so that you
+can track the failing script along with the data that makes the script fail.
+This tool is particularly useful for checking that received input data is valid
+because incorrect scripts often fail when an upstream component generates
+invalid data.
+
+To use this feature:
+
+1. Set the following system property to enable the dump feature:
+`-M-Dcom.mulesoft.dw.dump_files=true`
+1. [Optional] Specify the path in which to generate the dump files:
+`-M-Dcom.mulesoft.dw.dump_folder=<path_to_folder>`
+The default directory is set in the `java.io.tmpdir` property.
+
+### DataWeave Exceptions
+
+The following are some common DataWeave exceptions that you can find in your dump file, along with some details to troubleshoot these errors.
+
+#### Incorrect Arguments
+
+When a function is called with the incorrect kind of argument, it throws the
+exception, `org.mule.weave.v2.exception.UnsupportedTypeCoercionException`.
+Causes of this exception include:
+
+- null arg not accepted
+- mimetype unset
+
+##### Function Does Not Accept Null Argument
+
+The most common cause of this exception occurs when one of the arguments is
+`Null` and the function does not accept `Null` as an argument. This issue
+results in an error message similar to the following:
+
+```text
+You called the function '++' with these arguments:
+  1: Null (null)
+  2: String (" A text")
+
+But it expects one of these combinations:
+  (Array, Array)
+  (Date, Time)
+  (Date, LocalTime)
+  (Date, TimeZone)
+  (LocalDateTime, TimeZone)
+  (LocalTime, Date)
+  (LocalTime, TimeZone)
+  (Object, Object)
+  (String, String)
+  (Time, Date)
+  (TimeZone, LocalDateTime)
+  (TimeZone, Date)
+  (TimeZone, LocalTime)
+
+1| payload.message ++ " A text"
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Trace:
+  at ++ (line: 1, column: 1)
+  at main (line: 1, column: 17)
+```
+
+One way to resolve this issue uses the `default` operator. For example,
+using `payload.message default "" ++ " A text"` appends empty text when the
+message is null.
+
+##### MIME Type Is Not Set
+
+When the MIME type is not set, you receive an error message similar to the
+following:
+
+```text
+You called the function 'Value Selector' with these arguments:
+
+  1: String ("{ \"message\": 123}")
+  2: Name ("message")
+
+But it expects one of these combinations:
+  (Array, Name)
+  (Array, String)
+  (Date, Name)
+  (DateTime, Name)
+  (LocalDateTime, Name)
+  (LocalTime, Name)
+  (Object, Name)
+  (Object, String)
+  (Period, Name)
+  (Time, Name)
+
+1| payload.message
+   ^^^^^^^^^^^^^^^
+Trace:
+  at main (line: 1, column: 1)
+```
+
+When no MIME type is set on the payload, the MIME type defaults to
+`application/java`, and the content is handled as a `String` instead of a
+JSON object.
+
+#### Reader Properties Not Working In a Mule Application
+
+In a Mule application, the `input` directive to a DataWeave script does not work.
+Unlike Mule runtime, a standalone DataWeave runtime, such as the one in the DataWeave Playground+, can process a valid MIME type set through the `input` directive in the same DataWeave script.
+To input reader properties to a script in a Mule application, configure the `outputMimeType` attribute for the data source to produce
+the same results.
+See Using Reader and Writer Properties for further details.
+
+#### Stack Overflow
+
+When a function recurses too deeply, an error like the following one is thrown:
+
+```text
+Stack Overflow. Max stack is 256
+```
+
+You can configure the maximum stack size by using the property `com.mulesoft.dw.stacksize`.
+
+#### No space left on device
+
+To handle large payloads, DataWeave generates data that is handled in memory unless the payload exceeds a configurable limit.
+If the payload exceeds the limit, the data is stored on disk as output, input, and buffer files in a temporary directory. See DataWeave Memory Management for further details.
+
+When the streams that reference the files are closed, the files are released. Closure normally occurs when flows complete their execution, so many buffer files in the temporary folder can remain in use during long-running and concurrent executions.
+
+To avoid the exception `No space left on device`, try to provide more resources to run the application, or determine whether you can reduce the application's resource consumption.
+
+Sometimes bugs prevent the release of the files even after the flow has completed.
+If the latest Mule release does not fix this issue, please report the issue to the MuleSoft support team.
+
+#### Closed Streams
+
+Input data that reaches DataWeave is usually a stream. Mule handles the stream and adds auto-closing and repeatable capabilities to it by generating “cursors” over the stream.
+Sometimes a stream closes prematurely, before it reaches the DataWeave script, and it can be difficult to understand what closed it.
+In these circumstances, the script fails with an error similar to `Cannot open a new cursor on a closed stream`.
+
+If this error occurs in latest Mule update, please report it to the MuleSoft support team. It is not possible to work around the issue, but you can use the `com.mulesoft.dw.track.cursor.close` system property to determine which component closed the stream prematurely.
+With the property set, the error shows the stack trace from the moment that the stream was closed, which points to the component that triggered the closure.
+
+#### Output Mismatch When Undefined
+
+Unlike transformations, DataWeave expressions do not require you to define an output format because DataWeave can infer the output based on the expression and the variables you use. Occasionally, the inference process results in a mismatch between the inferred type and the expected type. To resolve this issue, you must make the output explicit. Common examples of this situation occur when:
+
+- xml extraction
+- multipart handling
+- manipulating text
+
+##### Extract Data from XML
+
+When extracting a String, for example, from an XML payload with the expression `payload.order.product.model`, DataWeave infers an XML output based on the payload format. In such cases, an error similar to the following one occurs:
+
+```text
+"Trying to output non-whitespace characters outside main element tree (in prolog or epilog), while writing Xml at ." evaluating expression: "payload.order.product.model".
+```
+
+For such an error, you must make the output format explicit, for example: `output text/plain --- payload.order.product.model`.
+
+##### Handle Multipart Entries
+
+A common inference error occurs with multipart data, which has a very specific structure. Consider a multipart payload and the expression `dw::core::Objects::keySet(payload.parts)`. Without an explicit output format, DataWeave must infer, based on the payload type, that you intend to output multipart content. In this case, an error similar to the following is thrown:
+
+```text
+"Expecting type is {
+  preamble?: String,
+  parts: {
+    _*: {
+      headers: Object,
+      content: Any
+    }
+  }
+} but got Array, while writing MultiPart.
+Trace:
+  at main (Unknown)" evaluating expression: "dw::core::Objects::keySet(payload.parts)".
+```
+
+To resolve this issue, you must define an output format, for example: `output application/json --- dw::core::Objects::keySet(payload.parts)`
+
+##### Manipulate Text Data
+
+You can use text data to create a more complex object. However, if you do not define the output format for the input text data, DataWeave infers that it must use the plain text writer for the output. The expression `payload splitBy ' '`, for example, will fail with an error similar to:
+
+```text
+"Text plain writer is unable to write Array.
+Reason:
+Cannot coerce Array (org.mule.weave.v2.model.values.ArrayValue$ArraySeqArrayValue@1331b353) to String
+Trace:
+  at main (Unknown), while writing TextPlain.
+Trace:
+  at main (Unknown)" evaluating expression: "payload splitBy ' '".
+```
+
+Making the output explicit solves the issue: `output application/java --- payload splitBy ' '`
+
+#### Encoding Issues
+
+Encoding issues can occur because of a mismatch between encodings used to read and write a file or when the encoding to write some text does not support some of the characters. Common examples include the following:
+
+- reader encoding
+- writer encoding
+- multipart reader
+
+##### Incorrect Encoding for the Reader
+
+In Mule, when you use components or connector operations that provide a `MIME Type` configuration (such as `Set Payload`, `File Read`, `HTTP Listener`), check that the encoding you set corresponds to  the encoding used to write the payload. DataWeave reads the encoding that you set in the `MIME Type` configuration.
+
+If you do not set the MIME type, DataWeave uses the default encoding provided by Mule through the `mule.encoding` system property.
+
+##### Encoding Used by the Writer Does Not Support Some Characters
+
+Check that your writer encoding supports the characters that you are trying to write.
+
+For example, writing the text `"～―－＄￠￡㈱①"` with the encoding `sjis` outputs `"???＄????"` because many of the input characters are not supported in that encoding (unlike UTF-8, for example).
+
+```text
+%dw 2.0
+output application/json encoding="sjis"
+---
+"～―－＄￠￡㈱①"
+```
+
+##### Multipart/Form-Data Reader Does Not Support UTF-8 Characters by Default
+
+If you use UTF-8 characters in the multipart filenames, the non-ASCII characters in the names are corrupted.
+
+Set the following system property to enable support for UTF-8 in multipart:
+`-M-Dmail.mime.allowutf8=true`
+
+For example, posting a multipart payload with filename=`不明.txt` without setting the `allowutf8` property to `true` produces the following unreadable text for the `filename` field:
+
+```text
+{
+  "Content-Disposition": {
+    name: "file",
+    filename: "ä\ufffd\ufffd明.txt",
+    subtype: "form-data"
+  },
+  "Content-Type": "text/plain"
+}
+```
+
+### DataWeave Warnings
+
+The following are some common DataWeave warnings that appear in your dump file, along with some details to address these warnings.
+
+#### End of Input Was Reached
+
+This warning appears because DataWeave treats the Unicode non-character `U+FFFF` as a special character that indicates the end of input.
+
+To avoid this warning, replace the special character in the raw payload and then proceed as usual.
+
+```text
+read(payload.^raw replace "\uFFFF" with "NonChar")
+```
+
+### Low Performance Issues
+
+#### application/dw Format
+
+Using `output application/dw` format can impact the performance of transformations. This format is intended to help you debug the results of DataWeave transformations.
+It is significantly slower than other formats, so avoid using this format in production applications.
+
+#### multipart/form-data Content Parsing
+
+For `multipart/form-data` inputs, accessing content of a large part can cause performance degradation, especially for high-memory formats like `application/xlsx`, because the interpreter attempts to parse the content of the part for further querying and analysis.
+
+You can use the `^raw` selector to avoid parsing binary contents of parts.
+
+The following example uses the `^raw` selector on specific operations over each part.
+
+##### Input
+
+```text
+--myboundary
+Content-Disposition: form-data; name="file1"; filename="a.json"
+Content-Type: application/json
+
+{
+"title": "Java 8 in Action",
+"author": "Mario Fusco",
+"year": 2014
+}
+--myboundary
+Content-Disposition: form-data; name="file2"; filename="a.xml"
+Content-Type: application/xml
+
+<doc>
+    <title> Available for download! </title>
+    <content> Really large content </content>
+</doc>
+--myboundary--
+```
+
+##### Source
+
+```text
+%dw 2.0
+input payload multipart boundary='myboundary'
+output application/json
+---
+payload.parts mapObject ((value, key, index) ->
+{
+    (key): {
+	fileName: payload.parts[index].headers.'Content-Disposition'.filename,
+    rawContent: payload.parts[index].content.^raw
+    }
+})
+```
+
+### See Also
+
+---
+
+## Versioning Behavior in DataWeave
+
+New minor versions of DataWeave can introduce changes that modify the way the language behaves. You can use DataWeave system properties that behave as _compatibility flags_ to continue using existing scripts that depend on the previous behavior. However, each flag defines a deletion version, which identifies the version in which the flag is no longer available and the behavior that it controls defaults to the changed behavior.
+
+Specifying a DataWeave language level indicates to the DataWeave runtime what compatibility flags are available. To upgrade and maintain backward compatibility, you can set the language level of a previous version so that the flags available on that version remain visible even if they expire in the DataWeave version to which you upgrade. The language level defaults to the running DataWeave version and has to be at most the same as the runtime version.
+
+For Mule applications, the language level is determined by the application's `minMuleVersion` setting (see Feature Flags Reference in the Mule documentation). Given the `minMuleVersion`, the language level is computed by subtracting two major versions, as this table shows:
+
+| minMuleVersion | Language Level |
+|---|---|
+| 4.12 | 2.12 |
+| 4.11 | 2.11 |
+| 4.10 | 2.10 |
+| 4.9 | 2.9 |
+| 4.8 | 2.8 |
+| 4.7 | 2.7 |
+| 4.6 | 2.6 |
+| 4.5 | 2.5 |
+| 4.4 | 2.4 |
+| 4.3 | 2.3 |
+
+Setting the Mule version configures the application to use the corresponding DataWeave language level. This setting is independent of the DataWeave syntax version, which is set through a DataWeave script's `%dw` directive. For details, see DataWeave Header.
+For example, the `com.mulesoft.dw.xml_reader.honourMixedContentStructure` system property is a compatibility flag for language level 2.4, when it was introduced, and it is removed in DataWeave 2.6. In DataWeave 2.6, the property is _visible only if_ you set the language level to 2.4 or 2.5. If you choose language level 2.4 it defaults to the old behavior, if you choose language level 2.5 it defaults to the new behavior.

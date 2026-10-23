@@ -1,0 +1,150 @@
+"""Export skills of this repository for any agent (Codex, Copilot, Cursor, Gemini, local models...).
+
+Run it yourself, after each update. The repository is never modified.
+
+  python tools/export_skills.py                  export every skill into ~/.agents/skills
+  python tools/export_skills.py --dry-run        print what would be done, write nothing
+  python tools/export_skills.py --cible DIR     export into another tool's skills folder
+  python tools/export_skills.py --with-rules F  inject the rules from file F after each frontmatter
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]  # tools/export_skills.py -> repo root
+MARKER = ".skills-framework-export"
+INDEX = "SKILLS.md"
+IGNORE = shutil.ignore_patterns("__pycache__", ".venv", "*.pyc")
+SKILL_DIR = re.compile(r"\$\{(?:CLAUDE_)?SKILL_DIR\}|\$(?:CLAUDE_)?SKILL_DIR(?![A-Za-z0-9_])")
+FRONTMATTER = re.compile(r"\A(---[ \t]*\r?\n(?:.*?\r?\n)?---[ \t]*)(?:\r?\n|\Z)", re.S)
+
+
+def find_skills(repo):
+    """Every folder holding a SKILL.md under skills/ (and framework/skill-template as demo)."""
+    found = []
+    for base in (repo / "skills",):
+        if base.is_dir():
+            for d in sorted(base.iterdir()):
+                if d.is_dir() and (d / "SKILL.md").is_file():
+                    found.append((d.name, d))
+    # include the template as a demo skill (optional)
+    tpl = repo / "framework" / "skill-template"
+    if tpl.is_dir() and (tpl / "SKILL.md").is_file():
+        found.append(("skill-template", tpl))
+    return found
+
+
+def parse_frontmatter(text):
+    m = FRONTMATTER.match(text)
+    if not m:
+        return None, None
+    fields, key = {}, None
+    for line in m.group(1).splitlines()[1:-1]:
+        if line[:1] in (" ", "\t") and key:
+            fields[key] = f"{fields[key]} {line.strip()}".strip()
+            continue
+        k, sep, v = line.partition(":")
+        if not sep:
+            continue
+        key, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        fields[key] = "" if v in (">", "|", ">-", "|-") else v
+    return fields, m
+
+
+def replace_skill_dir(text, where):
+    return SKILL_DIR.sub(lambda _: where, text)
+
+
+def add_rules(text, rules):
+    _, m = parse_frontmatter(text)
+    if not m:
+        raise ValueError("SKILL.md has no frontmatter")
+    eol = "\r\n" if "\r\n" in m.group(1) else "\n"
+    return m.group(1) + eol + eol + rules + eol + eol + text[m.end():].lstrip("\r\n")
+
+
+def export_skill(name, src, dest, cible, rules):
+    tmp = cible / f".{name}.tmp-{os.getpid()}"
+    old = cible / f".{name}.old-{os.getpid()}"
+    shutil.copytree(src, tmp, ignore=IGNORE)
+    where = dest.as_posix()
+    for p in sorted(tmp.rglob("*")):
+        if not p.is_file() or p.suffix.lower() != ".md":
+            continue
+        text = p.read_text(encoding="utf-8")
+        text = replace_skill_dir(text, where)
+        if rules and p.name == "SKILL.md":
+            text = add_rules(text, rules)
+        p.write_text(text, encoding="utf-8")
+    # swap
+    if dest.exists():
+        dest.rename(old)
+    tmp.rename(dest)
+    (dest / MARKER).write_text("exported\n", encoding="utf-8")
+    if old.exists():
+        shutil.rmtree(old)
+    return True
+
+
+def git_commit(repo):
+    if not (repo / ".git").exists():
+        return None
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--cible", default=str(Path.home() / ".agents" / "skills"))
+    ap.add_argument("--with-rules", default=None, help="file whose content is injected as rules")
+    args = ap.parse_args()
+
+    cible = Path(args.cible).expanduser().resolve()
+    rules = Path(args.with_rules).read_text(encoding="utf-8").strip() if args.with_rules else None
+
+    skills = find_skills(REPO)
+    print(f"Found {len(skills)} skills: {', '.join(n for n, _ in skills)}")
+
+    if args.dry_run:
+        for name, src in skills:
+            print(f"  would export {name} -> {cible / name}")
+        return 0
+
+    cible.mkdir(parents=True, exist_ok=True)
+    commit = git_commit(REPO)
+    exported = []
+    for name, src in skills:
+        dest = cible / name
+        if dest.exists() and not (dest / MARKER).is_file():
+            print(f"REFUSED: {dest} exists without marker; not overwriting.")
+            continue
+        export_skill(name, src, dest, cible, rules)
+        exported.append(name)
+        print(f"exported {name}")
+
+    # index
+    lines = ["# Skills index", "", "<!-- Generated by tools/export_skills.py. Do not edit. -->", ""]
+    for name, src in skills:
+        fm, _ = parse_frontmatter((src / "SKILL.md").read_text(encoding="utf-8"))
+        desc = (fm or {}).get("description", "")
+        lines.append(f"- **{name}** — {desc} (`{name}/SKILL.md`)")
+    (cible / INDEX).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Wrote {cible / INDEX}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
